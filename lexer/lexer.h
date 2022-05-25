@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../impl/definitions.h"
+
 #include "aho.h"
 #include "graphviz.h"
 #include <cstddef>
@@ -34,11 +36,13 @@ namespace lang {
     public:
         const continuous_location location;
 
-        const int id;
+        const language_lexem id;
         const std::string value;
 
-        lexem(int new_id, std::string value, continuous_location location);
+        lexem(language_lexem new_id, std::string value, continuous_location location);
     };
+
+    const lexem END_LEXEM = lexem(language_lexem::END, "", { "", 0, {} });
 
     std::ostream& operator<<(std::ostream& os, const lexem& lexem);
 
@@ -47,8 +51,10 @@ namespace lang {
     const generic_token_t IGNORED_TOKEN_ID = -2;
 
     struct named_lexem {
-        generic_token_t id;
+        language_lexem id;
         std::string name;
+
+        named_lexem(language_lexem _id, std::string name);
     };
     
     class lexer final {
@@ -61,6 +67,7 @@ namespace lang {
         void add_rules(std::initializer_list<std::pair<named_lexem, std::string>> rules);
 
         std::string get_token_name(generic_token_t id);
+        std::string get_token_name(language_lexem id);
 
         digraph draw_graph(trie* current = nullptr);
         void show_graph(trie* current = nullptr);

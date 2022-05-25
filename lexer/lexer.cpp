@@ -111,7 +111,7 @@ namespace lang {
     }
 
 
-    lexem::lexem(int _id, std::string _value, continuous_location _location)
+    lexem::lexem(language_lexem _id, std::string _value, continuous_location _location)
         : id(_id), value(_value), location(_location) {};
 
     std::ostream &operator<<(std::ostream &os, const lexem &lexem) {
@@ -128,10 +128,11 @@ namespace lang {
     }
 
     void lexer::add_rule(named_lexem new_lexem, std::string regex) {
-        regex_parse(m_lexer_nfsm, regex.c_str(), new_lexem.id);
+        generic_token_t id = static_cast<generic_token_t>(new_lexem.id);
+        regex_parse(m_lexer_nfsm, regex.c_str(), id);
 
-        m_rule_order.push_back(new_lexem.id);
-        m_token_names[new_lexem.id] = new_lexem.name;
+        m_rule_order.push_back(id);
+        m_token_names[id] = new_lexem.name;
     }
 
     void lexer::add_rules(std::initializer_list<std::pair<named_lexem, std::string>> rules) {
@@ -142,6 +143,10 @@ namespace lang {
     std::string lexer::get_token_name(generic_token_t id) {
         return m_token_names.at(id);
     }      
+
+    std::string lexer::get_token_name(language_lexem id) {
+        return get_token_name(static_cast<generic_token_t>(id));
+    }
 
     void lexer::compile() {
         std::set<trie*> tries = {};
@@ -161,6 +166,9 @@ namespace lang {
         digraph graph = draw_graph(current);
         digraph_render_and_destory(&graph);
     }      
+
+    named_lexem::named_lexem(language_lexem _id, std::string _name)
+        : id(_id), name(_name) {}
 
     struct captured_token {
         generic_token_t id;
@@ -208,8 +216,10 @@ namespace lang {
                     throw std::runtime_error("error: couldn't recognise token:\n" +
                                              location.underlined_location(&program));
                 // Emit current lexem
-                if (current_state->token != IGNORED_TOKEN_ID)
-                    lexems.push_back(lexem(current_state->token, current_token, location));
+                if (current_state->token != IGNORED_TOKEN_ID) {
+                    language_lexem id = static_cast<language_lexem>(current_state->token);
+                    lexems.push_back(lexem(id, current_token, location));
+                }
 
                 if (i == program.size()) // Current iteration is after the last
                     break;

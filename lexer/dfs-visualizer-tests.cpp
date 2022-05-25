@@ -28,13 +28,6 @@ void render_graph_and_print_file(trie* root, const std::map<generic_token_t, std
 }
 
 
-enum {
-    ARROW, COLON, COMMA, DEFUN, DIV, ELLIPSIS, ELSE, EQUAL, EQUALS,
-    FOR, GREATER, GREATER_OR_EQUAL, IF, IN, INT, LESS, LESS_OR_EQUAL,
-    LET, LRB, MINUS, MUL, NAME, NOT_EQUAL, NUMBER, PLUS, RETURN,
-    RRB, SEMICOLON, WHILE, LCB, RCB
-};
-
 static void print_all_lexems(lang::lexer& lexer, std::string& program, std::vector<lang::lexem>& lexems) {
     for (const auto& lexem: lexems) {
         std::cout << "Recognised token: <" << lexer.get_token_name(lexem.id) << ">"
@@ -48,6 +41,9 @@ TEST(few_rules) {
     lang::lexer lexer;
 
     lexer.ignore_rule("[\n \t]([\n \t])");
+
+    using namespace lang;
+    using enum language_lexem;
 
     lexer.add_rule(named(FOR),   "for");
     lexer.add_rule(named(ARROW), "a(a)a(a)([abc]m)(aba)");
@@ -77,6 +73,9 @@ TEST(full_language) {
 
     // Whitespace rule
     lexer.ignore_rule("[\n \t]([\n \t])");
+
+    using namespace lang;
+    using enum language_lexem;
 
     lexer.add_rules({
         { named(ARROW),            "->"                        },

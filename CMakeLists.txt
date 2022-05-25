@@ -8,5 +8,6 @@ project(lang VERSION 1.0)
 add_subdirectory(c-lib)
 
 add_subdirectory(lexer)
+add_subdirectory(parser)
 
-# add_subdirectory(parser)
+add_subdirectory(impl)

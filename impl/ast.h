@@ -37,16 +37,6 @@ struct ast {
 
 struct ast_statement: public ast {};
 
-struct ast_arg: public ast {
-    ast_arg(std::string name): m_name(name) {};
-
-    std::string m_name;
-
-    virtual void show_graph(SUBGRAPH_CONTEXT, node_id parent) override {
-        EDGE(parent, NODE("%s", m_name.c_str()));
-    }
-};
-
 struct ast_body: public ast {
     ast_body(std::vector<std::shared_ptr<ast_statement>> statements):
         m_statements(statements) {}
@@ -62,12 +52,12 @@ struct ast_body: public ast {
 };
 
 struct ast_function: public ast {
-    ast_function(std::string name, std::vector<std::shared_ptr<ast_arg>>&& args, std::shared_ptr<ast_body>&& body)
+    ast_function(std::string name, std::vector<std::string> args, std::shared_ptr<ast_body> body)
         : m_name(name), m_args(std::move(args)), m_body(std::move(body)) {}
 
     std::string m_name;
 
-    std::vector<std::shared_ptr<ast_arg>> m_args;
+    std::vector<std::string> m_args;
     std::shared_ptr<ast_body> m_body;
 
     virtual void show_graph(SUBGRAPH_CONTEXT, node_id parent) override {
@@ -78,7 +68,7 @@ struct ast_function: public ast {
         EDGE(function, args);
 
         for (const auto& arg: m_args)
-            arg->show_graph(CURRENT_SUBGRAPH_CONTEXT, args);
+            EDGE(args, NODE("%s", arg.c_str()));
 
         m_body->show_graph(CURRENT_SUBGRAPH_CONTEXT, function);
     }
@@ -135,7 +125,7 @@ struct ast_var: public ast_term {
     std::string m_name;
 
     virtual void show_graph(SUBGRAPH_CONTEXT, node_id parent) override {
-        node_id var = NODE("%d", m_name.c_str());
+        node_id var = NODE("%s", m_name.c_str());
         EDGE(parent, var);
     }
 };
@@ -320,17 +310,15 @@ struct ast_while: public ast_statement {
 };
 
 struct ast_assignment: public ast_statement {
-    ast_assignment(std::shared_ptr<ast_arg> arg,
+    ast_assignment(std::string arg,
                    std::shared_ptr<ast_expression> expression)
         : m_arg(arg), m_expression(expression) {}
   
-    std::shared_ptr<ast_arg> m_arg;
+    std::string m_arg;
     std::shared_ptr<ast_expression> m_expression;
 
     virtual void show_graph(SUBGRAPH_CONTEXT, node_id parent) override {
-        node_id assignment = NODE("="); EDGE(parent, assignment);
-
-        m_arg->show_graph(CURRENT_SUBGRAPH_CONTEXT, assignment);
+        node_id assignment = NODE("%s =", m_arg.c_str()); EDGE(parent, assignment);
         m_expression->show_graph(CURRENT_SUBGRAPH_CONTEXT, assignment);
     }
 };

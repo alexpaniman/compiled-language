@@ -1,3 +1,4 @@
+#include "graphviz.h"
 #include "parser.h"
 #include "lexer.h"
 
@@ -8,6 +9,7 @@
 #include <iostream>
 #include <memory>
 #include <variant>
+#include <chrono>
 
 static std::string read_whole_file(std::string file_name) {
     std::ifstream file(file_name);
@@ -27,135 +29,98 @@ void create_program_parser() {
     using namespace lang;
     using enum language_lexem;
 
-    auto name = static_p(NAME).transform<std::string>([](auto tree) { return tree.value; });
+    // ----------------------------------------- PRIMITIVES ----------------------------------------
+    auto name   = transform(static_p(NAME), [](auto tree) { return tree.value; });
 
-    auto arg = name.transform<std::shared_ptr<ast_arg>>([](auto tree) {
-        return std::make_shared<ast_arg>(tree);
-    });
+    auto number = construct<ast_number>(
+        transform(static_p(NUMBER), [](auto tree) { return std::stoi(tree.value); })
+    );
 
-    auto term = lazy<std::shared_ptr<ast_term>>();
-    auto expression = lazy<std::shared_ptr<ast_expression>>();
+    // ========================================= ARITHMETIC ========================================
 
-    auto mul = (term & static_p(MUL) & term).construct<ast_mul, 0, 2>();
-    auto div = (term & static_p(DIV) & term).construct<ast_div, 0, 2>();
+    // -------------------------------------------- BASIC ------------------------------------------
+    auto factor = lazy<std::shared_ptr<ast_term>>();           // Forward declared (recursive declaration)
+    auto term   = lazy<std::shared_ptr<ast_term>>();           // Forward declared (recursive declaration)
+    auto expression = lazy<std::shared_ptr<ast_expression>>(); // Forward declared (recursive declaration)
 
-    auto div_mul = (mul | div).variant_upcast<ast_term>();
+    // --------------------------------------- 1ST PRECEDENCE --------------------------------------
+    auto var = construct<ast_var>(name);
 
-    auto add = (div_mul & static_p(PLUS)  & expression).construct<ast_add, 0, 2>();
-    auto sub = (div_mul & static_p(MINUS) & expression).construct<ast_sub, 0, 2>();
+    auto mul = construct<ast_mul>(factor & ignore_p(MUL) & term);
+    auto div = construct<ast_div>(factor & ignore_p(DIV) & term);
+    term.set(variant_upcast<ast_term>(mul | div | factor));
 
-    auto&& expression_definition = (add | sub | term)
-        .variant_upcast<ast_expression>();
+    // --------------------------------------- 2ND PRECEDENCE --------------------------------------
+    auto add = construct<ast_add>(term & ignore_p(PLUS)  & expression);
+    auto sub = construct<ast_sub>(term & ignore_p(MINUS) & expression);
 
-    expression.set(expression_definition).own(add, sub, mul, div);
+    expression.set(variant_upcast<ast_expression>(add | sub | term));
 
-    auto body = lazy<std::shared_ptr<ast_body>>();
+    // ----------------------------------------- COMPARISON ----------------------------------------
+    auto named_comparison = [&](named_lexem lexem) { return expression & ignore_parser(lexem) & expression; };
+    #define comparison(id) named_comparison(named_lexem { id, #id })
 
-    auto less = (expression & static_p(LESS) & expression).construct<ast_less, 0, 2>();
-    auto less_or_equal = (expression & static_p(LESS_OR_EQUAL) & expression)
-        .construct<ast_less_or_equal, 0, 2>();
+    auto less             = construct<ast_less            >(comparison(LESS)            );
+    auto less_or_equal    = construct<ast_less_or_equal   >(comparison(LESS_OR_EQUAL)   );
+    auto greater          = construct<ast_greater         >(comparison(GREATER)         );
+    auto greater_or_equal = construct<ast_greater_or_equal>(comparison(GREATER_OR_EQUAL));
+    auto equals           = construct<ast_equals          >(comparison(EQUALS)          );
+    auto not_equal        = construct<ast_not_equals      >(comparison(NOT_EQUAL)       );
 
-    auto greater = (expression & static_p(GREATER) & expression).construct<ast_greater, 0, 2>();
-    auto greater_or_equal = (expression & static_p(GREATER_OR_EQUAL) & expression)
-        .construct<ast_greater_or_equal, 0, 2>();
+    #undef comparison
 
-    auto equals = (expression & static_p(EQUALS) & expression).construct<ast_less, 0, 2>();
-    auto not_equals = (expression & static_p(NOT_EQUAL) & expression).construct<ast_less, 0, 2>();
+    auto cond = variant_upcast<ast_cond>(less | less_or_equal | greater | greater_or_equal | equals | not_equal);
 
-    auto cond = (less | less_or_equal | greater | greater_or_equal | equals | not_equals)
-        .variant_upcast<ast_cond>()
-        .own(less, less_or_equal, greater, greater_or_equal, equals, not_equals);
+    // ---------------------------------------- ASSIGNMENT -----------------------------------------
+    auto assignment = name & ignore_p(EQUAL) & expression;
 
+    auto assignment_p   = construct<ast_assignment  >(ignore_p(LET) & assignment);
+    auto reassignment_p = construct<ast_reassignment>(                assignment);
 
-    auto if_p = (static_p(IF) & static_p(LRB) & cond & static_p(RRB) & body)
-        .construct<ast_if, 2, 4>();
+    // ------------------------------------------ TERMS --------------------------------------------
+    auto unary_minus = construct<ast_unary_minus>(ignore_p(MINUS) & factor);
 
-    auto while_p = (static_p(WHILE) & static_p(LRB) & cond & static_p(RRB) & body)
-        .construct<ast_while, 2, 4>();
+    auto arguments = ignore_p(LRB) & separated_by(expression, ignore_p(COMMA)) & ignore_p(RRB);
+    auto function_call = construct<ast_function_call>(name & arguments);
 
-    auto assignment_p = (static_p(LET) & arg & static_p(EQUAL) & expression)
-        .construct<ast_assignment, 1, 3>();
+    auto wrapped_expression =
+        construct<ast_wrapped_expression>(ignore_p(LRB) & expression & ignore_p(RRB));
 
-    auto reassignment_p = (name & static_p(EQUAL) & expression)
-        .construct<ast_reassignment, 0, 2>();
+    // <== Term declaration (see forward declaration in "arithmetic" section)
+    factor.set(variant_upcast<ast_term>(wrapped_expression | function_call | number | var)); // TODO: unary minus
 
-    auto unary_minus = (static_p(MINUS) & term).construct<ast_unary_minus, 1>();
+    // ========================================= STATMENTS =========================================
 
-    auto function_call = (name & static_p(LRB) & optional(expression
-                                    & many(static_p(COMMA) & expression)) & static_p(RRB))
-        .transform<std::shared_ptr<ast_function_call>>([](auto tree) {
-            std::string name = std::get<0>(tree);
+    auto body = lazy<std::shared_ptr<ast_body>>(); // Forward declared (recursive declaration)
 
-            std::vector<std::shared_ptr<ast_expression>> args;
-            auto& tree_args = std::get<2>(tree);
-            if (tree_args) {
-                args.push_back(std::move(std::get<0>(*tree_args)));
+    // ---------------------------------------- CONDITIONAL ----------------------------------------
+    auto condition_and_body = ignore_p(LRB) & cond & ignore_p(RRB) & body;
 
-                for (auto&& left_args: std::get<1>(*tree_args))
-                    args.push_back(std::move(std::get<1>(left_args)));
-            }
+    auto if_p    = construct<ast_if   >(ignore_p(IF)    & condition_and_body);
+    auto while_p = construct<ast_while>(ignore_p(WHILE) & condition_and_body);
 
-            return std::make_shared<ast_function_call>(name, std::move(args));
-        });
+    // ---------------------------------------------------------------------------------------------
+    auto for_p = construct<ast_for>(ignore_p(FOR) & ignore_p(LRB) & name
+                & ignore_p(IN) & factor & ignore_p(ELLIPSIS) & factor & ignore_p(RRB) & body);
 
-    auto number = static_p(NUMBER)
-        .transform<std::shared_ptr<ast_number>>([](auto tree) {
-            return std::make_shared<ast_number>(std::stoi(tree.value));
-        });
+    auto return_p = construct<ast_return>(ignore_p(RETURN) & expression);
 
-    auto wrapped_expression = (static_p(LRB) & expression & static_p(RRB))
-        .construct<ast_wrapped_expression, 1>();
+    // ---------------------------------------------------------------------------------------------
+    auto statement_without_semicolon = variant_upcast<ast_statement>(if_p | while_p | for_p);
+    auto statement_with_semicolon    = variant_upcast<ast_statement>(
+        assignment_p | reassignment_p | return_p & ignore_p(SEMICOLON));
 
+    auto statement = variant_upcast<ast_statement>(statement_with_semicolon | statement_without_semicolon);
 
-    auto&& term_definition = (number | function_call | wrapped_expression | unary_minus)
-        .variant_upcast<ast_term>();
+    // <== Body declaration (see forward declaration in "statements" section)
+    body.set(construct<ast_body>(ignore_p(LCB) & many(statement) & ignore_p(RCB)));
 
-    term.set(std::move(term_definition)).own(number, function_call, wrapped_expression, unary_minus);
+    // ---------------------------------------- TOP LEVEL ------------------------------------------
+    auto argument_declaration = ignore_p(LRB) & separated_by(name, ignore_p(COMMA)) & ignore_p(RRB);
+    auto function = construct<ast_function>(ignore_p(DEFUN) & name & argument_declaration & body);
 
-
-    auto for_p = (static_p(FOR) & static_p(LRB) & name
-                  & static_p(IN) & term & static_p(ELLIPSIS) & term & static_p(RRB) & body)
-        .construct<ast_for, 2, 4, 6, 8>();
-
-    auto return_p = (static_p(RETURN) & expression).construct<ast_return, 1>();
-
-
-    auto statement = ((if_p | while_p | assignment_p | reassignment_p | for_p | return_p) & static_p(SEMICOLON))
-        .transform<std::shared_ptr<ast_statement>>([](auto tree) {
-            return std::visit([](auto&& alternative) {
-                return std::static_pointer_cast<ast_statement>(alternative);
-            }, std::get<0>(tree));
-        }).own(if_p, while_p, assignment_p, reassignment_p, for_p, return_p);
-
-
-    auto&& body_definition = (static_p(LCB) & many(statement) & static_p(RCB)).construct<ast_body, 1>();
-
-    body.set(std::move(body_definition));
-
-
-    auto function = (static_p(DEFUN) & name & static_p(LRB)
-                     & optional(arg
-                                & many(static_p(COMMA) & arg)) & static_p(RRB) & body)
-        .transform<std::shared_ptr<ast_function>>([](auto tree) {
-            std::string name = std::get<1>(tree);
-
-            std::vector<std::shared_ptr<ast_arg>> args;
-            auto& tree_args = std::get<3>(tree);
-            if (tree_args) {
-                args.push_back(std::move(std::get<0>(*tree_args)));
-
-                for (auto&& left_args: std::get<1>(*tree_args))
-                    args.push_back(std::move(std::get<1>(left_args)));
-            }
-
-            return std::make_shared<ast_function>(name, std::move(args), std::move(std::get<5>(tree)));
-        });
-
-
-    auto program = many(function)
-        .transform<std::shared_ptr<ast_program>>([](auto tree) {
-            return std::make_shared<ast_program>(tree);
-        });
+    auto program = construct<ast_program>(many(function)); // <== Topmost parser
+    // ---------------------------------------------------------------------------------------------
 
     std::string file_name = "res/test.prog";
     std::string program_str = read_whole_file(file_name);
@@ -212,18 +177,28 @@ void create_program_parser() {
     });
 
     std::vector<lang::lexem> lexems = lexer.analyse(program_str, file_name);
-    for (auto el: lexems)
-        std::cout << el.location.underlined_location(&program_str);
+    for (auto el: lexems) {
+        std::cout << "note: detected lexem: <"<< lexer.get_token_name(el.id) << ">\n";
+        std::cout << el.location.underlined_location(&program_str) << "\n\n";
+    }
 
     lexems.push_back(lang::END_LEXEM);
 
-    // auto parser = create_program_parser();
-
+    auto start = std::chrono::high_resolution_clock::now();
     auto lexem_iterator = lexems.begin();
-    // if ((*program.parse(lexem_iterator))->m_functions.size() > 0)
-    //     std::cout << "works?!" << std::endl;
+    auto finish = std::chrono::high_resolution_clock::now();
+    std::cout << "lexical analysis: " << (double) std::chrono::duration_cast<std::chrono::nanoseconds>(finish-start).count() / 1e9 << "s\n";
+
+    auto show_graph = [](auto&& graph) { digraph_render_and_destory(&graph); };
+    show_graph(program.graph());
+
+    start = std::chrono::high_resolution_clock::now();
 
     auto parsed = program.parse(lexem_iterator);
+
+    finish = std::chrono::high_resolution_clock::now();
+    std::cout << "         parsing: " << (double) std::chrono::duration_cast<std::chrono::nanoseconds>(finish-start).count() / 1e9 << "s\n";
+
     if (parsed)
         (*parsed)->show();
 

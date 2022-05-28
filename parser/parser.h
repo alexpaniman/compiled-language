@@ -1,12 +1,14 @@
-#include "aho.h"
-#include "../impl/definitions.h"
 #include "lexer.h"
+#include "../impl/definitions.h"
+
+#include "graphviz.h"
 
 #include <memory>
 #include <optional>
 #include <iostream>
 #include <tuple>
 #include <type_traits>
+#include <utility>
 #include <vector>
 #include <variant>
 #include <functional>
@@ -19,11 +21,60 @@ namespace lang {
 
     //------------------------------------------------------------------------------
 
+    static constexpr bool show_utility_nodes = false;
+
+    //------------------------------------------------------------------------------
+
     template <typename result_type>
     class parser {
     public:
         virtual std::optional<result_type> parse(lexem_iterator& lexems) = 0;
+
+        virtual node_id connect_node(SUBGRAPH_CONTEXT, std::map<void*, node_id>& graphed) {
+            node_id this_node = 0;
+            if (graphed.contains(this))
+                this_node = graphed[this];
+            else {
+                node saved_node = DEFAULT_NODE;
+                style(DEFAULT_NODE);
+
+                this_node = NODE("%s", node_name().c_str());
+                graphed[this] = this_node;
+
+                DEFAULT_NODE = saved_node; // Restore style before
+
+                connect_children(CURRENT_SUBGRAPH_CONTEXT, graphed, this_node);
+            }
+
+            return this_node;
+        }
+
+        digraph draw_graph() {
+            return NEW_GRAPH({
+                NEW_SUBGRAPH(RANK_NONE, {
+                    DEFAULT_NODE = {
+                        .style = STYLE_BOLD,
+                        .color = GRAPHVIZ_BLACK,
+                        .shape = SHAPE_CIRCLE,
+                    };
+
+                    DEFAULT_EDGE = {
+                        .color = GRAPHVIZ_BLACK,
+                        .style = STYLE_SOLID
+                    };
+
+                    std::map<void*, node_id> graphed;
+                    connect_node(CURRENT_SUBGRAPH_CONTEXT, graphed);
+                });
+            });
+        }
+
         virtual ~parser() = default;
+
+        virtual std::string node_name() = 0; // Define name for the parser
+        virtual void style(node& default_node) {}
+
+        virtual void connect_children(SUBGRAPH_CONTEXT, std::map<void*, node_id>& graphed, node_id current) = 0;
     };
 
     //------------------------------------------------------------------------------
@@ -33,8 +84,42 @@ namespace lang {
     public:
         unary_parser(parser<input_type>& parser): m_parser(parser) {};
 
+        void connect_children(SUBGRAPH_CONTEXT, std::map<void*, node_id>& graphed, node_id current) override {
+            EDGE(current, m_parser.connect_node(CURRENT_SUBGRAPH_CONTEXT, graphed));
+        }
+
     protected:
         parser<input_type>& m_parser;
+    };
+
+    //------------------------------------------------------------------------------
+
+    class ignore {}; // Marker for ignored parsers
+
+    template <typename type>
+    class ignored_p: public unary_parser<type, ignore> {
+    public:
+        using unary_parser<type, ignore>::unary_parser;
+
+        std::optional<ignore> parse(lexem_iterator &lexems) override {
+            if (this->m_parser.parse(lexems))
+                return ignore {};
+            else
+                return std::nullopt;
+        }
+
+        node_id connect_node(SUBGRAPH_CONTEXT, std::map<void*, node_id>& graphed) override {
+            if (!show_utility_nodes)
+                return this->m_parser.connect_node(CURRENT_SUBGRAPH_CONTEXT, graphed);
+
+            return this->parser<ignore>::connect_node(CURRENT_SUBGRAPH_CONTEXT, graphed);
+        }
+
+        void connect_children(SUBGRAPH_CONTEXT, std::map<void*, node_id>& graphed, node_id current) override {
+            EDGE(current, this->m_parser.connect_node(CURRENT_SUBGRAPH_CONTEXT, graphed));
+        };
+
+        std::string node_name() override { return "(ignore)"; }
     };
 
     //------------------------------------------------------------------------------
@@ -56,6 +141,8 @@ namespace lang {
 
             return parsed_values;
         }
+
+        std::string node_name() override { return "*"; }
     };
 
     //------------------------------------------------------------------------------
@@ -74,8 +161,9 @@ namespace lang {
 
             return *parsed_value;
         }
-    };
 
+        std::string node_name() override { return "?"; }
+    };
 
     //------------------------------------------------------------------------------
 
@@ -95,6 +183,18 @@ namespace lang {
         operator bool() {
             return m_parser != nullptr;
         }
+
+        std::string node_name() override { return "(lazy)"; }
+        node_id connect_node(SUBGRAPH_CONTEXT, std::map<void*, node_id>& graphed) override {
+            if (!show_utility_nodes)
+                return m_parser->connect_node(CURRENT_SUBGRAPH_CONTEXT, graphed);
+
+            return this->parser<type>::connect_node(CURRENT_SUBGRAPH_CONTEXT, graphed);
+        }
+
+        void connect_children(SUBGRAPH_CONTEXT, std::map<void*, node_id>& graphed, node_id current) override {
+            EDGE(current, m_parser->connect_node(CURRENT_SUBGRAPH_CONTEXT, graphed));
+        };
 
     private:
         parser<type>* m_parser;
@@ -116,6 +216,19 @@ namespace lang {
             return m_transform(*parsed_value);
         }
 
+        node_id connect_node(SUBGRAPH_CONTEXT, std::map<void*, node_id>& graphed) override {
+            if (!show_utility_nodes)
+                return m_parser.connect_node(CURRENT_SUBGRAPH_CONTEXT, graphed);
+
+            return this->parser<transformed_type>::connect_node(CURRENT_SUBGRAPH_CONTEXT, graphed);
+        }
+
+        void connect_children(SUBGRAPH_CONTEXT, std::map<void*, node_id>& graphed, node_id current) override {
+            EDGE(current, m_parser.connect_node(CURRENT_SUBGRAPH_CONTEXT, graphed));
+        };
+
+        std::string node_name() override { return "(transform)"; }
+
     private:
         parser<original_type>& m_parser;
         transformed_type (*m_transform)(original_type);
@@ -129,21 +242,22 @@ namespace lang {
         binary_parser(parser<type_0>& first_parser, parser<type_1>& second_parser)
             : m_parser_0(first_parser), m_parser_1(second_parser) {};
 
+        void connect_children(SUBGRAPH_CONTEXT, std::map<void*, node_id>& graphed, node_id current) override {
+            LABELED_EDGE(current, m_parser_0.connect_node(CURRENT_SUBGRAPH_CONTEXT, graphed), "LHS");
+            LABELED_EDGE(current, m_parser_1.connect_node(CURRENT_SUBGRAPH_CONTEXT, graphed), "RHS");
+        }
+
     protected:
         parser<type_0>& m_parser_0;
         parser<type_1>& m_parser_1;
     };
-
-    template <typename type_1, typename... type_0s>
-    using flatten_tuple_parser = binary_parser<std::tuple<type_0s...>, type_1,
-                                            std::tuple<type_0s...,  type_1>>;
 
     //------------------------------------------------------------------------------
 
     template <typename left_type, typename right_type>
     static std::optional<std::tuple<left_type, right_type>>
         parser_and(parser<left_type>&   left_parser,
-                parser<right_type>& right_parser, lexem_iterator& lexems) {
+                   parser<right_type>& right_parser, lexem_iterator& lexems) {
 
         lexem_iterator saved_iterator = lexems;
 
@@ -162,35 +276,61 @@ namespace lang {
         return std::tuple(*try_to_parse_fst, *try_to_parse_snd);
     }
 
-    //------------------------------------------------------------------------------
 
-    template <typename type_0, typename type_1>
-    class and_p: public binary_parser<type_0, type_1, std::tuple<type_0, type_1>> {
+    template <typename... tuple_types>
+    constexpr auto strip_empty(std::tuple<tuple_types...> tuple) {
+        if constexpr (sizeof...(tuple_types) == 1)
+            return std::get<0>(tuple);
+        else
+            return tuple;
+    }
+
+    template <typename type>
+    constexpr auto remove_ignored(type value) {
+        if constexpr (std::is_same_v<type, ignore>)
+            return std::tuple<>();
+        else
+            return std::tuple(value);
+    }
+
+    template <typename... types>
+    constexpr auto remove_ignored(std::tuple<types...> tuple) {
+        return std::apply([](auto... args) {
+            return std::tuple_cat(remove_ignored(args)...);
+        }, tuple);
+    }
+
+    template <typename... types>
+    constexpr auto and_combined_tuple(std::tuple<types...> tuple) {
+        return strip_empty(remove_ignored(tuple));
+    }
+
+    template <typename type_0, typename type_1, typename result_type>
+    class base_and_p: public binary_parser<type_0, type_1, result_type> {
     public:
-        using base = binary_parser<type_0, type_1, std::tuple<type_0, type_1>>;
-        using binary_parser<type_0, type_1, std::tuple<type_0, type_1>>::binary_parser;
+        using binary_parser<type_0, type_1, result_type>::binary_parser;
 
-        std::optional<std::tuple<type_0, type_1>> parse(lexem_iterator& lexems) override {
-            return parser_and(this->m_parser_0, this->m_parser_1, lexems);
+        std::string node_name() override { return "&"; }
+
+        void style(node& default_node) override {
+            default_node.color = GRAPHVIZ_RED;
         }
     };
 
-    template <typename type_1, typename... type_0s>
-    class and_p<std::tuple<type_0s...>, type_1>: public flatten_tuple_parser<type_1, type_0s...> {
+    template <typename... types>
+    using and_return_t = decltype(and_combined_tuple(std::declval<std::tuple<types...>>()));
 
+    template <typename type_0, typename type_1>
+    class and_p: public base_and_p<type_0, type_1, and_return_t<type_0, type_1>> {
     public:
-        using base = flatten_tuple_parser<type_1, type_0s...>;
-        using flatten_tuple_parser<type_1, type_0s...>::flatten_tuple_parser;
+        using base_and_p<type_0, type_1, and_return_t<type_0, type_1>>::base_and_p;
 
-        std::optional<std::tuple<type_0s..., type_1>> parse(lexem_iterator& lexems) override {
-            auto simple_parser_result = parser_and(this->m_parser_0, this->m_parser_1, lexems);
-            if (!simple_parser_result)
+        std::optional<and_return_t<type_0, type_1>> parse(lexem_iterator& lexems) override {
+            auto try_to_parse = parser_and(this->m_parser_0, this->m_parser_1, lexems);
+            if (!try_to_parse)
                 return std::nullopt;
 
-            auto [parsed_first, parsed_second] = *simple_parser_result;
-
-            // Flatten result in one tuple:
-            return std::tuple_cat(parsed_first, std::tuple(parsed_second));
+            return and_combined_tuple(*try_to_parse);
         }
     };
 
@@ -202,18 +342,18 @@ namespace lang {
     template <typename... packed_types, typename current_type, typename... left_types>
     struct unique<std::variant<packed_types...>, current_type, left_types...>
         : std::conditional_t<(std::is_same_v<current_type, packed_types> || ...),
-                            unique<std::variant<packed_types...>,               left_types...>,
-                            unique<std::variant<packed_types..., current_type>, left_types...>> {};
+                             unique<std::variant<packed_types...>,               left_types...>,
+                             unique<std::variant<packed_types..., current_type>, left_types...>> {};
 
-    template <typename... Ts>
-    using unique_variant = typename unique<std::variant<>, Ts...>::type;
+    template <typename... types>
+    using unique_variant = typename unique<std::variant<>, types...>::type;
 
     //------------------------------------------------------------------------------
 
     template <typename left_type, typename right_type>
     static std::optional<unique_variant<left_type, right_type>>
         parser_or(parser<left_type>&   left_parser,
-                parser<right_type>& right_parser, lexem_iterator& lexems) {
+                  parser<right_type>& right_parser, lexem_iterator& lexems) {
 
         lexem_iterator saved_iterator = lexems;
 
@@ -232,14 +372,28 @@ namespace lang {
 
     //------------------------------------------------------------------------------
 
-    template <typename type_0, typename type_1>
-    class or_p: public binary_parser<type_0, type_1, unique_variant<type_0, type_1>> {
+    template <typename type_0, typename type_1, typename result_type>
+    class base_or_p: public binary_parser<type_0, type_1, result_type> {
     public:
-        using binary_parser<type_0, type_1, unique_variant<type_0, type_1>>::binary_parser;
+        using binary_parser<type_0, type_1, result_type>::binary_parser;
+
+        std::string node_name() override { return "|"; }
+
+        void style(node& default_node) override {
+            default_node.color = GRAPHVIZ_ORANGE;
+        }
+    };
+
+    template <typename type_0, typename type_1>
+    class or_p: public base_or_p<type_0, type_1, unique_variant<type_0, type_1>> {
+    public:
+        using base_or_p<type_0, type_1, unique_variant<type_0, type_1>>::base_or_p;
 
         std::optional<unique_variant<type_0, type_1>> parse(lexem_iterator& lexems) override {
             return parser_or(this->m_parser_0, this->m_parser_1, lexems);
         }
+
+        std::string node_name() override { return "|"; }
     };
 
     //------------------------------------------------------------------------------
@@ -260,8 +414,8 @@ namespace lang {
     //------------------------------------------------------------------------------
 
     template <typename type_1, typename... type_0s>
-    using flatten_variant_parser = binary_parser<std::variant<type_0s...>, type_1,
-                                                unique_variant<type_0s..., type_1>>;
+    using flatten_variant_parser = base_or_p<std::variant<type_0s...>, type_1,
+                                             unique_variant<type_0s..., type_1>>;
 
     template <typename type_1, typename... type_0s>
     class or_p<std::variant<type_0s...>, type_1>: public flatten_variant_parser<type_1, type_0s...> {
@@ -279,6 +433,8 @@ namespace lang {
 
             return variant_cast(std::get<0>(*parser_result));
         }
+
+        std::string node_name() override { return "|"; }
     };
 
     //------------------------------------------------------------------------------
@@ -314,6 +470,10 @@ namespace lang {
             return m_parser.parse(lexems);
         }
 
+        digraph graph() {
+            return m_parser.draw_graph();
+        }
+
         parser<return_value>& raw() { return m_parser; }
 
         parser_w<return_value>& set(parser_w<return_value>& init) {
@@ -334,35 +494,103 @@ namespace lang {
             return this->own(init);
         }
 
-        template <typename transformed_type>
-        parser_w<transformed_type> transform(transformed_type (*transform)(return_value)) {
-            auto&& new_parser =
-                std::make_shared<transform_p<return_value, transformed_type>>(this->raw(), transform);
-
-            return parser_w<transformed_type>(*new_parser).own(new_parser).own(*this);
-        }
-
-        template <typename constructor_type, size_t... indexes>
-        auto construct() {
-            return this->transform<std::shared_ptr<constructor_type>>([](auto tree) {
-                return std::make_shared<constructor_type>(std::get<indexes>(tree)...);
-            });
-        }
-
-        template <typename target_type>
-        auto variant_upcast() {
-            return this->transform<std::shared_ptr<target_type>>([](auto tree) {
-                return std::visit([](auto&& alternative) {
-                    return std::static_pointer_cast<target_type>(alternative);
-                }, tree);
-            });
-        }
-
-
     private:
         parser<return_value>& m_parser;
     };
 
+    template <typename original_type>
+    auto non_owning_transform(lang::parser_w<original_type>&& parser, auto&& transformer) {
+        // Get lambda's return type:
+        using transformed_type = std::decay_t<decltype(transformer(std::declval<original_type>()))>;
+        using transform_parser = transform_p<original_type, transformed_type>;
+
+        auto&& new_parser = std::make_shared<transform_parser>(parser.raw(), transformer);
+        return parser_w<transformed_type>(*new_parser).own(new_parser);
+    }
+
+    template <typename original_type>
+    auto transform(lang::parser_w<original_type>&& parser, auto&& transformer) {
+        return non_owning_transform(std::move(parser), transformer).own(parser);
+    }
+
+    template <typename original_type>
+    auto transform(lang::parser_w<original_type>& parser, auto&& transformer) {
+        return non_owning_transform(std::move(parser), transformer);
+    }
+
+    template <typename constructor, typename... arg_types>
+    parser_w<std::shared_ptr<constructor>>
+        non_owning_construct(parser_w<std::tuple<arg_types...>>&& parser) {
+
+        return non_owning_transform(std::move(parser), [](auto tree) {
+            return std::apply([](auto&&... args) {
+                return std::make_shared<constructor>(args...);
+            }, tree);
+        });
+    }
+
+    template <typename constructor, typename arg_type>
+    parser_w<std::shared_ptr<constructor>> non_owning_construct(parser_w<arg_type>&& parser) {
+        return non_owning_transform(std::move(parser), [](auto tree) {
+            return std::make_shared<constructor>(tree);
+        });
+    }
+
+    template <typename constructor, typename arg_type>
+    parser_w<std::shared_ptr<constructor>> construct(parser_w<arg_type>& parser) {
+        return non_owning_construct<constructor>(std::move(parser));
+    }
+
+    template <typename constructor, typename arg_type>
+    parser_w<std::shared_ptr<constructor>> construct(parser_w<arg_type>&& parser) {
+        return non_owning_construct<constructor>(std::move(parser)).own(parser);
+    }
+
+    template <typename target_type, typename original_type>
+    auto variant_upcast(parser_w<original_type>&& parser) {
+        return transform(std::move(parser), [](auto tree) {
+            return std::visit([](auto&& alternative) {
+                return std::static_pointer_cast<target_type>(alternative);
+            }, tree);
+        });
+    }
+
+    template <typename repeated_type>
+    parser_w<std::vector<repeated_type>>
+        separated_by(parser_w<repeated_type>& repeated, parser_w<ignore>&& separator) {
+
+        return transform(optional(repeated & many(std::move(separator) & repeated)), [](auto tree) {
+            std::vector<repeated_type> values;
+            if (tree) {
+                values.push_back(std::get<0>(*tree));
+
+                for (auto &&arg: std::get<1>(*tree))
+                    values.push_back(arg);
+            }              
+
+            return values;
+        });
+    }      
+
+    template <typename repeated_type>
+    parser_w<std::vector<repeated_type>>
+        separated_by(parser_w<repeated_type>&& repeated, parser_w<ignore>&& separator) {
+        return separated_by(repeated, std::move(separator)).own(repeated);
+    }
+
+    //------------------------------------------------------------------------------
+
+    template <typename type>
+    parser_w<ignore> ignored(parser_w<type>&& ignored) {
+        auto&& new_parser = std::make_shared<ignored_p<type>>(ignored.raw());
+        return parser_w(*new_parser).own(new_parser).own(ignored);
+    }
+
+    template <typename type>
+    parser_w<ignore> ignored(parser_w<type>& ignored) {
+        auto&& new_parser = std::make_shared<ignored_p<type>>(ignored.raw());
+        return parser_w(*new_parser).own(new_parser);
+    }
 
     //------------------------------------------------------------------------------
 
@@ -478,13 +706,38 @@ namespace lang {
 
     class lexem_parser_p: public parser<lang::lexem> {
     public:
-        lexem_parser_p(language_lexem id);
+        lexem_parser_p(named_lexem id);
         std::optional<lang::lexem> parse(lexem_iterator& lexems) override;
 
     private:
-        language_lexem m_token_id;
+        named_lexem m_named_token;
+
+        std::string node_name() override;
+        void connect_children(SUBGRAPH_CONTEXT, std::map<void*, node_id>& graphed, node_id current) override;
+        
+        void style(node& default_node) override;
     };
 
-    parser_w<lexem> static_p(language_lexem id);
+    parser_w<lexem>  static_parser(named_lexem id);
+    #define static_p(id) static_parser(lang::named_lexem { id, #id })
+
+    parser_w<ignore> ignore_parser(named_lexem id);
+    #define ignore_p(id) ignore_parser(lang::named_lexem { id, #id })
+
+    template <typename type>
+    class test: public parser<type> {
+        std::optional<type> parse(lexem_iterator& lexems) override {
+            return type {};
+        }
+    };
+
+    template <size_t id>
+    struct dummy_t { static constexpr int value = id; };
+
+    template <size_t id>
+    auto test_p() {
+        auto&& new_parser = std::make_shared<test<dummy_t<id>>>();
+        return parser_w(*new_parser).own(new_parser);
+    }
 
 }

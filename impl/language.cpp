@@ -30,42 +30,42 @@ void create_program_parser() {
     using enum language_lexem;
 
     // ----------------------------------------- PRIMITIVES ----------------------------------------
-    auto name   = transform(static_p(NAME), [](auto tree) { return tree.value; });
-
-    auto number = construct<ast_number>(
-        transform(static_p(NUMBER), [](auto tree) { return std::stoi(tree.value); })
-    );
+    auto name                  = transform(static_p(NAME), [](auto tree) { return tree.value; });
+    alloc_p<ast_number> number = 
+        transform(static_p(NUMBER), [](auto tree) { return std::stoi(tree.value); });
 
     // ========================================= ARITHMETIC ========================================
 
     // -------------------------------------------- BASIC ------------------------------------------
-    auto factor = lazy<std::shared_ptr<ast_term>>();           // Forward declared (recursive declaration)
-    auto term   = lazy<std::shared_ptr<ast_term>>();           // Forward declared (recursive declaration)
-    auto expression = lazy<std::shared_ptr<ast_expression>>(); // Forward declared (recursive declaration)
+
+    lazy_w<std::shared_ptr<ast_term>> factor;
+    lazy_w<std::shared_ptr<ast_term>> term;
+    lazy_w<std::shared_ptr<ast_expression>> expression;
 
     // --------------------------------------- 1ST PRECEDENCE --------------------------------------
-    auto var = construct<ast_var>(name);
+    alloc_p<ast_var> var = name;
 
-    auto mul = construct<ast_mul>(factor & ignore_p(MUL) & term);
-    auto div = construct<ast_div>(factor & ignore_p(DIV) & term);
-    term.set(variant_upcast<ast_term>(mul | div | factor));
+    alloc_p<ast_mul> mul = factor & ignore_p(MUL) & term;
+    alloc_p<ast_div> div = factor & ignore_p(DIV) & term;
+
+    term = variant_upcast<ast_term>(mul | div | factor);
 
     // --------------------------------------- 2ND PRECEDENCE --------------------------------------
-    auto add = construct<ast_add>(term & ignore_p(PLUS)  & expression);
-    auto sub = construct<ast_sub>(term & ignore_p(MINUS) & expression);
+    alloc_p<ast_add> add = term & ignore_p(PLUS)  & expression;
+    alloc_p<ast_sub> sub = term & ignore_p(MINUS) & expression;
 
-    expression.set(variant_upcast<ast_expression>(add | sub | term));
+    expression = variant_upcast<ast_expression>(add | sub | term);
 
     // ----------------------------------------- COMPARISON ----------------------------------------
     auto named_comparison = [&](named_lexem lexem) { return expression & ignore_parser(lexem) & expression; };
     #define comparison(id) named_comparison(named_lexem { id, #id })
 
-    auto less             = construct<ast_less            >(comparison(LESS)            );
-    auto less_or_equal    = construct<ast_less_or_equal   >(comparison(LESS_OR_EQUAL)   );
-    auto greater          = construct<ast_greater         >(comparison(GREATER)         );
-    auto greater_or_equal = construct<ast_greater_or_equal>(comparison(GREATER_OR_EQUAL));
-    auto equals           = construct<ast_equals          >(comparison(EQUALS)          );
-    auto not_equal        = construct<ast_not_equals      >(comparison(NOT_EQUAL)       );
+    alloc_p<ast_less>             less             = comparison(LESS);
+    alloc_p<ast_less_or_equal>    less_or_equal    = comparison(LESS_OR_EQUAL);
+    alloc_p<ast_greater>          greater          = comparison(GREATER);
+    alloc_p<ast_greater_or_equal> greater_or_equal = comparison(GREATER_OR_EQUAL);
+    alloc_p<ast_equals>           equals           = comparison(EQUALS);
+    alloc_p<ast_not_equals>       not_equal        = comparison(NOT_EQUAL);
 
     #undef comparison
 
@@ -74,36 +74,35 @@ void create_program_parser() {
     // ---------------------------------------- ASSIGNMENT -----------------------------------------
     auto assignment = name & ignore_p(EQUAL) & expression;
 
-    auto assignment_p   = construct<ast_assignment  >(ignore_p(LET) & assignment);
-    auto reassignment_p = construct<ast_reassignment>(                assignment);
+    alloc_p<ast_assignment>   assignment_p   = ignore_p(LET) & assignment;
+    alloc_p<ast_reassignment> reassignment_p = assignment;
 
     // ------------------------------------------ TERMS --------------------------------------------
-    auto unary_minus = construct<ast_unary_minus>(ignore_p(MINUS) & factor);
+    alloc_p<ast_unary_minus> unary_minus = ignore_p(MINUS) & factor;
 
     auto arguments = ignore_p(LRB) & separated_by(expression, ignore_p(COMMA)) & ignore_p(RRB);
-    auto function_call = construct<ast_function_call>(name & arguments);
+    alloc_p<ast_function_call> function_call = name & arguments;
 
-    auto wrapped_expression =
-        construct<ast_wrapped_expression>(ignore_p(LRB) & expression & ignore_p(RRB));
+    alloc_p<ast_wrapped_expression> wrapped_expression = ignore_p(LRB) & expression & ignore_p(RRB);
 
     // <== Term declaration (see forward declaration in "arithmetic" section)
-    factor.set(variant_upcast<ast_term>(wrapped_expression | function_call | number | var)); // TODO: unary minus
+    factor = variant_upcast<ast_term>(wrapped_expression | function_call | number | var); // TODO: unary minus
 
     // ========================================= STATMENTS =========================================
 
-    auto body = lazy<std::shared_ptr<ast_body>>(); // Forward declared (recursive declaration)
+    lazy_w<std::shared_ptr<ast_body>> body; // Forward declared (recursive declaration)
 
     // ---------------------------------------- CONDITIONAL ----------------------------------------
     auto condition_and_body = ignore_p(LRB) & cond & ignore_p(RRB) & body;
 
-    auto if_p    = construct<ast_if   >(ignore_p(IF)    & condition_and_body);
-    auto while_p = construct<ast_while>(ignore_p(WHILE) & condition_and_body);
+    alloc_p<ast_if> if_p = ignore_p(IF) & condition_and_body;
+    alloc_p<ast_while> while_p = ignore_p(WHILE) & condition_and_body;
 
     // ---------------------------------------------------------------------------------------------
-    auto for_p = construct<ast_for>(ignore_p(FOR) & ignore_p(LRB) & name
-                & ignore_p(IN) & factor & ignore_p(ELLIPSIS) & factor & ignore_p(RRB) & body);
+    alloc_p<ast_for> for_p = ignore_p(FOR) & ignore_p(LRB) & name &
+        ignore_p(IN) & factor & ignore_p(ELLIPSIS) & factor & ignore_p(RRB) & body;
 
-    auto return_p = construct<ast_return>(ignore_p(RETURN) & expression);
+    alloc_p<ast_return> return_p = ignore_p(RETURN) & expression;
 
     // ---------------------------------------------------------------------------------------------
     auto statement_without_semicolon = variant_upcast<ast_statement>(if_p | while_p | for_p);
@@ -113,11 +112,11 @@ void create_program_parser() {
     auto statement = variant_upcast<ast_statement>(statement_with_semicolon | statement_without_semicolon);
 
     // <== Body declaration (see forward declaration in "statements" section)
-    body.set(construct<ast_body>(ignore_p(LCB) & many(statement) & ignore_p(RCB)));
+    body = construct<ast_body>(ignore_p(LCB) & many(statement) & ignore_p(RCB));
 
     // ---------------------------------------- TOP LEVEL ------------------------------------------
     auto argument_declaration = ignore_p(LRB) & separated_by(name, ignore_p(COMMA)) & ignore_p(RRB);
-    auto function = construct<ast_function>(ignore_p(DEFUN) & name & argument_declaration & body);
+    alloc_p<ast_function> function = ignore_p(DEFUN) & name & argument_declaration & body;
 
     auto program = construct<ast_program>(many(function)); // <== Topmost parser
     // ---------------------------------------------------------------------------------------------

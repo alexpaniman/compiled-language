@@ -3,6 +3,8 @@
 
 #include "graphviz.h"
 
+#include <utility>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <iostream>
@@ -442,6 +444,8 @@ namespace lang {
     template<typename return_value>
     class parser_w {
     public:
+        typedef return_value target_parser_type; // For use in generic operators
+
         std::vector<std::shared_ptr<void>> m_subject_parsers;
 
         parser_w(parser<return_value>& parser)
@@ -498,6 +502,16 @@ namespace lang {
         parser<return_value>& m_parser;
     };
 
+    template <typename type>
+    using compatible_parser_return_t =
+        typename std::remove_reference_t<type>::target_parser_type;
+
+    template <typename type>
+    concept compatible_parser_w = std::is_convertible_v<
+            std::remove_reference_t<type>,
+            parser_w<compatible_parser_return_t<type>>
+        >;
+
     template <typename original_type>
     auto non_owning_transform(lang::parser_w<original_type>&& parser, auto&& transformer) {
         // Get lambda's return type:
@@ -546,6 +560,21 @@ namespace lang {
         return non_owning_construct<constructor>(std::move(parser)).own(parser);
     }
 
+    template<typename return_value>
+    class alloc_p {
+    public:
+        typedef std::shared_ptr<return_value> target_parser_type; // For use in generic operators
+
+        template <compatible_parser_w input_parser>
+        alloc_p(input_parser&& parser)
+            : m_parser(construct<return_value>(std::forward<input_parser>(parser))) {}
+
+        operator parser_w<std::shared_ptr<return_value>>() { return m_parser; }
+
+    private:
+        parser_w<std::shared_ptr<return_value>> m_parser;
+    };
+
     template <typename target_type, typename original_type>
     auto variant_upcast(parser_w<original_type>&& parser) {
         return transform(std::move(parser), [](auto tree) {
@@ -555,13 +584,17 @@ namespace lang {
         });
     }
 
-    template <typename repeated_type>
-    parser_w<std::vector<repeated_type>>
-        separated_by(parser_w<repeated_type>& repeated, parser_w<ignore>&& separator) {
+    template <compatible_parser_w repeated_parser>
+    auto separated_by(repeated_parser&& repeated, parser_w<ignore>&& separator) {
+        using repeated_t = compatible_parser_return_t<repeated_parser>;
 
-        return transform(optional(repeated & many(std::move(separator) & repeated)), [](auto tree) {
-            std::vector<repeated_type> values;
-            if (tree) {
+        // Grammar: <separated_by> ::= (repeated & (<separator> & repeated)*)?
+        auto separated_by_grammar = optional(std::forward<repeated_parser>(repeated)
+                                             & many(std::move(separator) & repeated));
+
+        return transform(std::move(separated_by_grammar), [](auto tree) {
+            std::vector<repeated_t> values;
+            if (tree) { // Collect parsed values
                 values.push_back(std::get<0>(*tree));
 
                 for (auto &&arg: std::get<1>(*tree))
@@ -571,12 +604,6 @@ namespace lang {
             return values;
         });
     }      
-
-    template <typename repeated_type>
-    parser_w<std::vector<repeated_type>>
-        separated_by(parser_w<repeated_type>&& repeated, parser_w<ignore>&& separator) {
-        return separated_by(repeated, std::move(separator)).own(repeated);
-    }
 
     //------------------------------------------------------------------------------
 
@@ -600,6 +627,25 @@ namespace lang {
         return parser_w(*new_parser).own(new_parser);
     }
 
+    template <typename type>
+    class lazy_w {
+    public:
+        typedef type target_parser_type; // For use in generic operators
+
+        lazy_w(): m_parser(lazy<type>()) {}
+
+        template <compatible_parser_w parser_type>
+        requires std::is_same_v<typename std::remove_reference_t<parser_type>::target_parser_type, type>
+        void operator=(parser_type&& parser) {
+            m_parser.set(std::forward<parser_type>(parser));
+        }
+
+        operator parser_w<type>() { return m_parser; }
+
+    private:
+        parser_w<type> m_parser;
+    };
+
     //------------------------------------------------------------------------------
 
     template <typename type_0, typename type_1>
@@ -610,26 +656,51 @@ namespace lang {
 
     //------------------------------------------------------------------------------
 
-    template <typename type_0, typename type_1>
-    auto operator&(parser_w<type_0>& parser_0, parser_w<type_1>& parser_1) {
-        return allocate_and(std::move(parser_0), std::move(parser_1));
+    template <typename type, typename subject_parser_type>
+    void take_ownership(parser_w<type>& owning, subject_parser_type&& subject) {
+        if constexpr (std::is_rvalue_reference_v<decltype(subject)>)
+            owning.own(subject);
     }
 
-    template <typename type_0, typename type_1>
-    auto operator&(parser_w<type_0>&& parser_0, parser_w<type_1>& parser_1) {
-        return allocate_and(std::move(parser_0), std::move(parser_1)).own(parser_0);
+    template <compatible_parser_w type_0, compatible_parser_w type_1>
+    auto operator&(type_0&& parser_0, type_1&& parser_1) {
+        using parser_0_type = typename std::remove_reference_t<type_0>::target_parser_type;
+        using parser_1_type = typename std::remove_reference_t<type_1>::target_parser_type;
+
+        auto&& new_parser =
+            std::make_shared<and_p<parser_0_type, parser_1_type>>(
+                static_cast<parser_w<parser_0_type>>(parser_0).raw(),
+                static_cast<parser_w<parser_1_type>>(parser_1).raw()
+            );
+
+        auto new_parser_w = parser_w(*new_parser).own(new_parser);
+
+        take_ownership(new_parser_w, std::forward<type_0>(parser_0));
+        take_ownership(new_parser_w, std::forward<type_1>(parser_1));
+
+        return new_parser_w;
     }
 
-    template <typename type_0, typename type_1>
-    auto operator&(parser_w<type_0>& parser_0, parser_w<type_1>&& parser_1) {
-        return allocate_and(std::move(parser_0), std::move(parser_1)).own(parser_1);
-    }
+    // template <typename type_0, typename type_1>
+    // auto operator&(parser_w<type_0>& parser_0, parser_w<type_1>& parser_1) {
+    //     return allocate_and(std::move(parser_0), std::move(parser_1));
+    // }
 
-    template <typename type_0, typename type_1>
-    auto operator&(parser_w<type_0>&& parser_0, parser_w<type_1>&& parser_1) {
-        return allocate_and(std::move(parser_0), std::move(parser_1))
-            .own(parser_0, parser_1);
-    }
+    // template <typename type_0, typename type_1>
+    // auto operator&(parser_w<type_0>&& parser_0, parser_w<type_1>& parser_1) {
+    //     return allocate_and(std::move(parser_0), std::move(parser_1)).own(parser_0);
+    // }
+
+    // template <typename type_0, typename type_1>
+    // auto operator&(parser_w<type_0>& parser_0, parser_w<type_1>&& parser_1) {
+    //     return allocate_and(std::move(parser_0), std::move(parser_1)).own(parser_1);
+    // }
+
+    // template <typename type_0, typename type_1>
+    // auto operator&(parser_w<type_0>&& parser_0, parser_w<type_1>&& parser_1) {
+    //     return allocate_and(std::move(parser_0), std::move(parser_1))
+    //         .own(parser_0, parser_1);
+    // }
 
     //------------------------------------------------------------------------------
 
@@ -641,45 +712,64 @@ namespace lang {
 
     //------------------------------------------------------------------------------
 
-    template <typename type_0, typename type_1>
-    auto operator|(parser_w<type_0>& parser_0, parser_w<type_1>& parser_1) {
-        return allocate_or(std::move(parser_0), std::move(parser_1));
+    template <compatible_parser_w type_0, compatible_parser_w type_1>
+    auto operator|(type_0&& parser_0, type_1&& parser_1) {
+        using parser_0_type = typename std::remove_reference_t<type_0>::target_parser_type;
+        using parser_1_type = typename std::remove_reference_t<type_1>::target_parser_type;
+
+        auto&& new_parser =
+            std::make_shared<or_p<parser_0_type, parser_1_type>>(
+                static_cast<parser_w<parser_0_type>>(parser_0).raw(),
+                static_cast<parser_w<parser_1_type>>(parser_1).raw()
+            );
+
+        auto new_parser_w = parser_w(*new_parser).own(new_parser);
+
+        take_ownership(new_parser_w, std::forward<type_0>(parser_0));
+        take_ownership(new_parser_w, std::forward<type_1>(parser_1));
+
+        return new_parser_w;
     }
 
-    template <typename type_0, typename type_1>
-    auto operator|(parser_w<type_0>&& parser_0, parser_w<type_1>& parser_1) {
-        return allocate_or(std::move(parser_0), std::move(parser_1)).own(parser_0);
-    }
+    //------------------------------------------------------------------------------
 
-    template <typename type_0, typename type_1>
-    auto operator|(parser_w<type_0>& parser_0, parser_w<type_1>&& parser_1) {
-        return allocate_or(std::move(parser_0), std::move(parser_1)).own(parser_1);
-    }
+    // template <typename type_0, typename type_1>
+    // auto operator|(parser_w<type_0>& parser_0, parser_w<type_1>& parser_1) {
+    //     return allocate_or(std::move(parser_0), std::move(parser_1));
+    // }
 
-    template <typename type_0, typename type_1>
-    auto operator|(parser_w<type_0>&& parser_0, parser_w<type_1>&& parser_1) {
-        return allocate_or(std::move(parser_0), std::move(parser_1))
-            .own(parser_0, parser_1);
-    }
+    // template <typename type_0, typename type_1>
+    // auto operator|(parser_w<type_0>&& parser_0, parser_w<type_1>& parser_1) {
+    //     return allocate_or(std::move(parser_0), std::move(parser_1)).own(parser_0);
+    // }
+
+    // template <typename type_0, typename type_1>
+    // auto operator|(parser_w<type_0>& parser_0, parser_w<type_1>&& parser_1) {
+    //     return allocate_or(std::move(parser_0), std::move(parser_1)).own(parser_1);
+    // }
+
+    // template <typename type_0, typename type_1>
+    // auto operator|(parser_w<type_0>&& parser_0, parser_w<type_1>&& parser_1) {
+    //     return allocate_or(std::move(parser_0), std::move(parser_1))
+    //         .own(parser_0, parser_1);
+    // }
 
     //------------------------------------------------------------------------------
 
     template <typename parsed_type>
     static inline auto allocate_many(parser_w<parsed_type>&& parser) {
-        auto&& new_parser = std::make_shared<many_p<parsed_type>>(parser.raw());
-        return parser_w(*new_parser).own(new_parser);
     }
 
     //------------------------------------------------------------------------------
 
-    template <typename parsed_type>
-    auto many(parser_w<parsed_type>& parser) {
-        return allocate_many(std::move(parser));
-    }
+    template <compatible_parser_w parser_type>
+    auto many(parser_type&& parser) {
+        using parsed_type = compatible_parser_return_t<parser_type>;
 
-    template <typename parsed_type>
-    auto many(parser_w<parsed_type>&& parser) {
-        return allocate_many(std::move(parser)).own(parser);
+        parser_w<parsed_type> wrapped_parser = parser;
+
+        auto&& new_parser = std::make_shared<many_p<parsed_type>>(wrapped_parser.raw());
+        return parser_w(*new_parser).own(new_parser).own(wrapped_parser);
     }
 
     //------------------------------------------------------------------------------
